@@ -5870,9 +5870,11 @@ bool ReadConsoleMessage(JSContext* context, int argc, JSValueConst* argv, std::s
 JSValue NativeConsoleLog(JSContext* context, JSValueConst, int argc, JSValueConst* argv) {
     std::string message;
     if (! ReadConsoleMessage(context, argc, argv, message)) return JS_EXCEPTION;
-    // Authored console output is part of the script API, independently of renderer tracing.
-    // Keep both the observable argument conversions above and the completed message in release.
+#if WESCENE_ENABLE_DIAGNOSTICS
+    // Authored console output remains available in diagnostics and golden builds without
+    // adding per-frame script noise to release renderer logs.
     WallpaperLog(LOGLEVEL_INFO, "", 0, "SceneScript log: %s", message.c_str());
+#endif
     return JS_UNDEFINED;
 }
 
