@@ -29,7 +29,6 @@ constexpr uint32_t kStaticPositionTexcoordFloats = 5;
 constexpr uint32_t kStaticNormalFloats           = 8;
 constexpr uint32_t kStaticTangentSpaceFloats     = 12;
 constexpr uint32_t kStaticTangentSpaceSecondUvFloats = 14;
-constexpr uint32_t kStaticTriangleIndexBytes     = 2 * 3;
 constexpr uint32_t kStaticSkinnedAttributeMask   = 0x01800000;
 constexpr uint32_t kStaticSkinFloats             = 8;
 constexpr uint32_t kStaticWideIndexFlag          = 1;
@@ -255,6 +254,11 @@ constexpr std::array<StaticMdlFormat, 5> kStaticMdlFormats {{
 
 bool CanReadBytes(const fs::IBinaryStream& f, uint64_t byte_count);
 bool ReadBoundedString(fs::IBinaryStream& f, std::string& value);
+bool ReadStaticChunkInfo(fs::IBinaryStream& f, const char* layout, uint32_t chunk_index,
+                         std::string_view path, const std::string& material,
+                         uint32_t& chunk_info);
+bool ReadStaticIndexBlob(fs::IBinaryStream& f, const char* layout, uint32_t chunk_info,
+                         uint32_t chunk_index, std::string_view path, WPMdl::StaticChunk& chunk);
 
 WPPuppet::PlayMode ToPlayMode(std::string_view m) {
     if (m == "loop" || m.empty()) return WPPuppet::PlayMode::Loop;
@@ -533,7 +537,10 @@ void UpdateStaticBounds(WPMdl::StaticChunk& chunk) {
 bool ReadStaticChunk(fs::IBinaryStream& f,
                      uint32_t          mdl_flag,
                      std::string       material_json_file,
+                     uint32_t          chunk_index,
+                     std::string_view  path,
                      WPMdl::StaticChunk& chunk) {
+    constexpr const char* kLayout = "legacy";
     const uint32_t vertex_float_count = StaticVertexFloatCount(mdl_flag);
     if (vertex_float_count == 0) {
         LOG_ERROR("static mdl has unknown vertex flag %u before material '%s'",
@@ -542,7 +549,13 @@ bool ReadStaticChunk(fs::IBinaryStream& f,
         return false;
     }
 
-    f.ReadInt32(); // Static MDLV0014 chunks carry a reserved zero before the vertex byte block.
+    // Interleaved MDLV0004/MDLV0014 chunks start with the same info word as later formats. It is
+    // usually zero, but meshes over 65535 vertices set kStaticWideIndexFlag and store 32-bit
+    // indices, so it must be honoured rather than skipped as a reserved field.
+    uint32_t chunk_info { 0 };
+    if (! ReadStaticChunkInfo(f, kLayout, chunk_index, path, material_json_file, chunk_info)) {
+        return false;
+    }
 
     const uint32_t vertex_size = f.ReadUint32();
     const uint32_t vertex_stride = vertex_float_count * sizeof(float);
@@ -555,6 +568,7 @@ bool ReadStaticChunk(fs::IBinaryStream& f,
     }
 
     chunk.material_json_file = std::move(material_json_file);
+    chunk.chunk_info         = chunk_info;
     chunk.vertex_flag        = mdl_flag;
     chunk.vertex_stride      = vertex_stride;
     chunk.vertex_blob.resize(vertex_size);
@@ -564,18 +578,7 @@ bool ReadStaticChunk(fs::IBinaryStream& f,
         return false;
     }
 
-    const uint32_t indices_size = f.ReadUint32();
-    if (indices_size == 0 || indices_size % kStaticTriangleIndexBytes != 0) {
-        LOG_ERROR("static mdl material '%s' has unsupported index byte size %u",
-                  chunk.material_json_file.c_str(),
-                  indices_size);
-        return false;
-    }
-
-    chunk.indices.resize(indices_size / kStaticTriangleIndexBytes);
-    for (auto& index : chunk.indices) {
-        for (auto& v : index) v = f.ReadUint16();
-    }
+    if (! ReadStaticIndexBlob(f, kLayout, chunk_info, chunk_index, path, chunk)) return false;
     UpdateStaticBounds(chunk);
     return true;
 }
@@ -819,6 +822,14 @@ bool ReadStaticFlaggedGeometry(fs::IBinaryStream& f, const char* layout, uint32_
         return false;
     }
 
+    return ReadStaticIndexBlob(f, layout, chunk_info, chunk_index, path, chunk);
+}
+
+// Reads a chunk's index blob after its vertex blob. The index width comes from the chunk info word,
+// and every index is checked against the vertex count so a misread width fails loudly instead of
+// producing out-of-range triangles.
+bool ReadStaticIndexBlob(fs::IBinaryStream& f, const char* layout, uint32_t chunk_info,
+                         uint32_t chunk_index, std::string_view path, WPMdl::StaticChunk& chunk) {
     if (! CanReadBytes(f, sizeof(uint32_t))) {
         LOG_ERROR("static mdl %s chunk %u index size is truncated: path='%.*s' material='%s'",
                   layout,
@@ -872,7 +883,7 @@ bool ReadStaticFlaggedGeometry(fs::IBinaryStream& f, const char* layout, uint32_
                   static_cast<int>(path.size()),
                   path.data(),
                   chunk.material_json_file.c_str(),
-                  vertex_stride,
+                  chunk.vertex_stride,
                   index_value_bytes);
         return false;
     }
@@ -1996,7 +2007,8 @@ bool WPMdlParser::ParseStaticModel(std::string_view path, fs::VFS& vfs, WPMdl& m
                     f, std::move(material_json_file), chunk_index, path, chunk)) {
                 return false;
             }
-        } else if (! ReadStaticChunk(f, mdl_flag, std::move(material_json_file), chunk)) {
+        } else if (! ReadStaticChunk(
+                       f, mdl_flag, std::move(material_json_file), chunk_index, path, chunk)) {
             return false;
         }
         if (header.UsesSkinVariantMaterials()) {
