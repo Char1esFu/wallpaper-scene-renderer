@@ -1940,11 +1940,17 @@ bool WPMdlParser::ParseStaticModel(std::string_view path, fs::VFS& vfs, WPMdl& m
         return false;
     }
     if (header.HasPrefixedMaterialTable() && header.material_path_count < chunk_count) {
-        LOG_ERROR("static mdl has fewer prefixed material paths than chunks: %s materials=%u chunks=%u",
-                  str_path.c_str(),
-                  header.material_path_count,
-                  chunk_count);
-        return false;
+        // A prefixed table needs at least one material per chunk, so a shorter table cannot be
+        // what the file holds. Some MDLV0004 models (e.g. workshop 910662590 Tiger.mdl: field 1,
+        // 3 chunks) instead store one material string in front of each chunk, the same layout as
+        // MDLV0014, so read them that way rather than rejecting the whole model.
+        LOG_INFO("static mdl v%d declares %u materials for %u chunks; reading interleaved per-chunk "
+                 "materials: %s",
+                 mdl.mdlv,
+                 header.material_path_count,
+                 chunk_count,
+                 str_path.c_str());
+        header.material_layout = StaticMaterialPathLayout::InterleavedPerChunk;
     }
 
     mdl.kind = WPMdl::MeshKind::Static;
